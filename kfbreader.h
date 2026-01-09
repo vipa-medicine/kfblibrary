@@ -1,283 +1,203 @@
 #ifndef __KFBREADER__
 #define __KFBREADER__
-#include <iostream>
+
 #include <map>
-#include <dlfcn.h>
-#include <cmath>
-#include <vector>
 #include <memory>
+#include <string>
+
 #include "KFB.h"
 
+using ll = long long int;
+using BYTE = unsigned char;
 
-using ll=long long int;
-using BYTE=unsigned char;
-using namespace std;
+// 全局库状态结构（内部使用，但需要在头文件声明以便 ImgHandle 引用）
+struct KfbLibrary {
+    void* handle;
+    bool initialized;
 
+    // 缓存的函数指针
+    DLLInitImageFileFunc InitImageFile;
+    DLLGetHeaderInfoFunc GetHeaderInfo;
+    DLLGetImageStreamFunc GetImageStream;
+    DLLGetImageDataRoiFunc GetImageDataRoi;
+    DLLUnInitImageFileFunc UnInitImageFile;
+    DLLDeleteImageDataFunc DeleteImageData;
+    DLLGetImageFunc GetThumbnailImage;
+    DLLGetImageFunc GetPreviewImage;
+    DLLGetImageFunc GetLabelImage;
+
+    KfbLibrary();
+    ~KfbLibrary() = default;
+};
+
+// 附属图像数据结构（缩略图、标签、预览图）
 struct AssoImage {
     int nBytes;
     int width;
     int height;
-    shared_ptr<BYTE> buf;
+    std::shared_ptr<BYTE> buf;
 
-    AssoImage(){
-        nBytes = width = height = 0;
-        buf = nullptr;
-    }
-
-    AssoImage(int nBytes, int width, int height, shared_ptr<BYTE> buf){
-        this->nBytes = nBytes;
-        this->width = width;
-        this->height = height;
-        this->buf = buf;
-    }
-
-    ~AssoImage()=default;
+    AssoImage();
+    AssoImage(int nBytes, int width, int height, std::shared_ptr<BYTE> buf);
+    ~AssoImage() = default;
 };
 
+// KFB 文件句柄，封装厂商库的状态和缓存的函数指针
 struct ImgHandle {
-    void* handle;
+    // 厂商库状态
     ImageInfoStruct* imgStruct;
-    map<string, string> properties;
+    bool isInitialized;  // 标记 InitImageFile 是否成功
+
+    // 图像元数据
     int maxLevel;
     int scanScale;
     int width;
     int height;
+
+    // 属性和附属图像
+    std::map<std::string, std::string> properties;
+    std::map<std::string, AssoImage> assoImages;
     const char** assoNames;
-    map<string, AssoImage> assoImages;
-    vector<BYTE*> alloc_mem;
-    bool debug;
 
-    ImgHandle() {
-        properties = map<string, string>();
-        assoImages = map<string, AssoImage>();
-        alloc_mem = vector<BYTE*>();
-        handle = nullptr;
-        imgStruct = new ImageInfoStruct;
-        maxLevel = 0;
-        scanScale = 0;
-        width = height = 0;
-        assoNames = nullptr;
-        debug = false;
-    }
+    ImgHandle();
+    ~ImgHandle();
 
-    ~ImgHandle() {
-        delete this->imgStruct;
-        if(assoNames) delete [] assoNames;
-        if(debug)
-            cout << "free " << alloc_mem.size() << " objects" << endl;
-        for(BYTE* ptr:alloc_mem) delete [] ptr;
-        dlclose(handle);
-    }
-
+    // 禁止拷贝
+    ImgHandle(const ImgHandle&) = delete;
+    ImgHandle& operator=(const ImgHandle&) = delete;
 };
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
 /**
- * Open a whole slide image.
+ * 全局初始化厂商库（只需调用一次）
  *
- * This function can be expensive; avoid calling it unnecessarily.  For
- * example, a tile server should not call openslide_open() on every tile
- * request.  Instead, it should maintain a cache of OpenSlide objects and
- * reuse them when possible.
- *
- * @param filename The filename to open.  On Windows, this must be in UTF-8.
- * @return
- *         On success, a new OpenSlide object.
- *         If the file is not recognized by OpenSlide, NULL.
- *         If the file is recognized but an error occurred, an OpenSlide
- *         object in error state.
+ * @param dllPath 厂商库路径 (libImageOperationLib.so)
+ * @return 成功返回 true，失败返回 false
  */
-
-ImgHandle* kfbslide_open(const char * dllPath, const char* filename);
+bool kfbslide_init(const char* dllPath);
 
 /**
- * Close an OpenSlide object.
- * No other threads may be using the object.
- * After this function returns, the object cannot be used anymore.
+ * 全局清理厂商库（程序退出时调用）
+ */
+void kfbslide_cleanup();
+
+/**
+ * 检查厂商库是否已初始化
+ */
+bool kfbslide_is_initialized();
+
+/**
+ * 打开 KFB 文件（需要先调用 kfbslide_init）
  *
- * @param osr The OpenSlide object.
+ * @param filename KFB 文件路径
+ * @return 成功返回 ImgHandle 指针，失败返回 nullptr
+ */
+ImgHandle* kfbslide_open(const char* filename);
+
+/**
+ * 打开 KFB 文件（向后兼容，内部自动调用 init）
+ *
+ * @param dllPath 厂商库路径 (libImageOperationLib.so)
+ * @param filename KFB 文件路径
+ * @return 成功返回 ImgHandle 指针，失败返回 nullptr
+ */
+ImgHandle* kfbslide_open_with_lib(const char* dllPath, const char* filename);
+
+/**
+ * 关闭 KFB 文件，释放所有资源
  */
 void kfbslide_close(ImgHandle* s);
 
 /**
- * Quickly determine whether a whole slide image is recognized.
- *
- * If OpenSlide recognizes the file referenced by @p filename, return a
- * string identifying the slide format vendor.  This is equivalent to the
- * value of the #OPENSLIDE_PROPERTY_NAME_VENDOR property.  Calling
- * openslide_open() on this file will return a valid OpenSlide object or
- * an OpenSlide object in error state.
- *
- * Otherwise, return NULL.  Calling openslide_open() on this file will also
- * return NULL.
- *
- * @param filename The filename to check.  On Windows, this must be in UTF-8.
- * @return An identification of the format vendor for this file, or NULL.
- * @since 3.4.0
+ * 检测文件格式厂商
  */
-const char * kfbslide_detect_vendor(const char *);
+const char* kfbslide_detect_vendor(const char*);
 
 /**
- * Get the NULL-terminated array of property names.
- *
- * This function returns an array of strings naming properties available
- * in the whole slide image.
- *
- * @param osr The OpenSlide object.
- * @return A NULL-terminated string array of property names, or
- *         an empty array if an error occurred.
+ * 获取属性名列表
  */
-// 逆向: 固定值 "openslide.mpp-x", "openslide.mpp-t", "openslide.vendor"
 const char** kfbslide_property_names(ImgHandle* preader);
-/**
- * Get the value of a single property.
- *
- * This function returns the value of the property given by @p name.
- *
- * @param osr The OpenSlide object.
- * @param name The name of the desired property. Must be
-               a valid name as given by openslide_get_property_names().
- * @return The value of the named property, or NULL if the property
- *         doesn't exist or an error occurred.
- */
-// 逆向: mpp为headerInfo.CapRes, vendor为Kfbio
-const char * kfbslide_property_value(ImgHandle* preader, const char * attribute_name);
 
 /**
- * Get the downsampling factor of a given level.
- *
- * @param osr The OpenSlide object.
- * @param level The desired level.
- * @return The downsampling factor for this level, or -1.0 if an error occurred
- *         or the level was out of range.
- * @since 3.3.0
+ * 获取属性值
+ */
+const char* kfbslide_property_value(ImgHandle* preader, const char* attribute_name);
+
+/**
+ * 获取指定层的下采样倍率
  */
 double kfbslide_get_level_downsample(ImgHandle* s, int level);
 
-
 /**
- * Get the best level to use for displaying the given downsample.
- *
- * @param osr The OpenSlide object.
- * @param downsample The downsample factor.
- * @return The level identifier, or -1 if an error occurred.
- * @since 3.3.0
+ * 根据下采样倍率获取最佳层级
  */
 int kfbslide_get_best_level_for_downsample(ImgHandle* s, double downsample);
 
-
 /**
- * Get the number of levels in the whole slide image.
- *
- * @param osr The OpenSlide object.
- * @return The number of levels, log2(header.BlockSize).
+ * 获取金字塔层数
  */
 int kfbslide_get_level_count(ImgHandle* s);
 
 /**
- * Get the dimensions of a level.
- *
- * @param osr The OpenSlide object.
- * @param level The desired level.
- * @param[out] w The width of the image, or -1 if an error occurred
- *               or the level was out of range.
- * @param[out] h The height of the image, or -1 if an error occurred
- *               or the level was out of range.
- * @since 3.3.0
+ * 获取指定层的尺寸
  */
 ll kfbslide_get_level_dimensions(ImgHandle* s, int level, ll* width, ll* height);
 
 /**
- * Get the dimensions of level 0 (the largest level). Exactly
- * equivalent to calling openslide_get_level_dimensions(osr, 0, w, h).
- *
- * @param osr The OpenSlide object.
- * @param[out] w The width of the image, or -1 if an error occurred.
- * @param[out] h The height of the image, or -1 if an error occurred.
- * @since 3.3.0
+ * 获取 level 0 的尺寸
  */
 ll kfbslide_get_level0_dimensions(ImgHandle* s, ll* width, ll* height);
 
-
-
 /**
- * Copy pre-multiplied ARGB data from an associated image.
- *
- * This function reads and decompresses an associated image associated
- * with a whole slide image. @p dest must be a valid pointer to enough
- * memory to hold the image, at least (width * height * 4) bytes in
- * length.  Get the width and height with
- * openslide_get_associated_image_dimensions().
- *
- * If an error occurs or has occurred, then the memory pointed to by @p dest
- * will be cleared. In versions prior to 4.0.0, this function did nothing
- * if an error occurred.
- *
- * For more information about processing pre-multiplied pixel data, see
- * the [OpenSlide website](https://openslide.org/docs/premultiplied-argb/).
- *
- * @param osr The OpenSlide object.
- * @param dest The destination buffer for the ARGB data.
- * @param name The name of the desired associated image. Must be
- *             a valid name as given by openslide_get_associated_image_names().
+ * 读取附属图像
+ * 注意：调用者必须调用 kfbslide_buffer_free 释放返回的 buffer
  */
 BYTE* kfbslide_read_associated_image(ImgHandle* s, const char* name);
+
 /**
- * Get the dimensions of an associated image.
- *
- * This function returns the width and height of an associated image
- * associated with a whole slide image. Once the dimensions are known,
- * use openslide_read_associated_image() to read the image.
- *
- * @param osr The OpenSlide object.
- * @param name The name of the desired associated image. Must be
- *            a valid name as given by openslide_get_associated_image_names().
- * @param[out] w The width of the associated image, or -1 if an error occurred.
- * @param[out] h The height of the associated image, or -1 if an error occurred.
+ * 获取附属图像尺寸
  */
-void kfbslide_get_associated_image_dimensions(ImgHandle* s, const char* name, ll* width, ll*height, ll*nBytes);
+void kfbslide_get_associated_image_dimensions(
+    ImgHandle* s, const char* name, ll* width, ll* height, ll* nBytes);
+
 /**
- * Get the NULL-terminated array of associated image names.
- *
- * This function returns an array of strings naming associated images
- * available in the whole slide image.
- *
- * @param osr The OpenSlide object.
- * @return A NULL-terminated string array of associated image names, or
-           an empty array if an error occurred.
+ * 获取附属图像名称列表
  */
 const char** kfbslide_get_associated_image_names(ImgHandle* s);
 
-
-bool kfbslide_read_region(ImgHandle* s, int level, int x, int y, int* nBytes, BYTE** buf);
+/**
+ * 读取指定位置的图像块
+ * 注意：x, y 是 Level 0 坐标（遵循 OpenSlide 标准）
+ */
+bool kfbslide_read_region(
+    ImgHandle* s, int level, int x, int y, int* nBytes, BYTE** buf);
 
 /**
- * Copy pre-multiplied ARGB data from a whole slide image.
- *
- * This function reads and decompresses a region of a whole slide
- * image into the specified memory location. @p dest must be a valid
- * pointer to enough memory to hold the region, at least (@p w * @p h * 4)
- * bytes in length. If an error occurs or has occurred, then the memory
- * pointed to by @p dest will be cleared.
- *
- * For more information about processing pre-multiplied pixel data, see
- * the [OpenSlide website](https://openslide.org/docs/premultiplied-argb/).
- *
- * @param osr The OpenSlide object.
- * @param dest The destination buffer for the ARGB data.
- * @param x The top left x-coordinate, in the level 0 reference frame.
- * @param y The top left y-coordinate, in the level 0 reference frame.
- * @param level The desired level.
- * @param w The width of the region. Must be non-negative.
- * @param h The height of the region. Must be non-negative.
+ * 读取指定区域的图像数据（ROI）
+ * 注意：x, y 是 Level 0 坐标（遵循 OpenSlide 标准，C++ 层负责坐标转换）
+ *       width, height 是目标 level 的像素尺寸
  */
-bool kfbslide_get_image_roi_stream(ImgHandle* s, int level, int x, int y, int width, int height, int* nBytes, BYTE** buf);
+bool kfbslide_get_image_roi_stream(
+    ImgHandle* s, int level, int x, int y, int width, int height,
+    int* nBytes, BYTE** buf);
 
-// 内存管理: Python无法释放C库中malloc的资源, 因此必须允许库自身释放
-// 我们在关闭handle时释放所有malloc的资源
-bool kfbslide_buffer_free(ImgHandle* s, BYTE* buf);
+/**
+ * 释放本库分配的 buffer（如 read_associated_image 返回的）
+ * 使用 free() 释放
+ */
+bool kfbslide_buffer_free(BYTE* buf);
+
+/**
+ * 释放厂商 DLL 分配的 buffer（read_region/get_image_roi_stream 返回的）
+ * 优先使用 DeleteImageData，回退到 free()
+ */
+bool kfbslide_region_buffer_free(BYTE* buf);
+
 #ifdef __cplusplus
 }
 #endif
+
 #endif

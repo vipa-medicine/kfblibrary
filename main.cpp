@@ -5,7 +5,6 @@ using namespace std;
 
 int main() {
     ImgHandle* s = kfbslide_open("lib/libImageOperationLib.so", "/nfs3-p1/hkw/PrognosisData/feulgenstain/预后差死亡复发组/A死亡复发组冰对 Feulgen/200615671.kfb");
-    s->debug = true;
     cout << "Section 1: Associated Images" << endl;
     const char** sptr = kfbslide_get_associated_image_names(s);
     auto ptr = sptr;
